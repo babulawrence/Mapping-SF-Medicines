@@ -1,0 +1,604 @@
+---
+title: "Mapping SF Medicines"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    social : menu
+    source_code: embed
+    vertical_layout: fill
+    runtime: shiny
+    theme: simplex
+ #source:https://testing-apps.shinyapps.io/flexdashboard-highcharter/   
+---
+
+```{r}
+library(shiny)
+library(flexdashboard)
+library(tidyverse)
+library(tidyr) 
+library(maps)
+library(wbstats)
+library(leaflet)
+library(DT)
+library(ggplot2)
+library(dplyr)
+library(VIM)
+library(readxl)
+library(flextable)
+library(plotly)
+library(janitor)
+library(scales)
+library(highcharter)
+
+knitr::opts_chunk$set(message = FALSE)
+
+#Import and organize data
+
+country <- read_excel("C:/Gram project/Datasets/Samples.xlsx")
+
+```
+# About
+
+Column 1 {data-width=350}
+-----------------------------------------------------------------------
+
+This application is in support with the IDDO's Medicine Quality Research Group 
+objective, "Increasing understanding of the prevalence and distribution of 
+SF (Substandard and falsified) medical products around the world".
+It's aim is to show the distribution of SF products across the world. 
+
+The data in this application are from surveyor, medicine quality tool developed
+by the IDDO's IT team.The application is built in R language and application's
+layout is produced with the flexdashboard package,charts are produced by
+ggplot2, plotly and highchart packages.
+
+```{r}
+#Organizing data
+
+country<-country %>% filter(studytype =="Prevalence survey",
+            drugtype %in% c("Antibiotic","Antimalarial")) %>% 
+  mutate(country= recode(country,"Unknown"="NULL")) %>% 
+  mutate(drugstatus= recode(drugstatus,"Unknown"="NULL")) %>% 
+  mutate(country = ifelse(country == "NULL", NA, country))
+
+country[country == "NULL"] <- NA
+
+#impute for the missing
+newdata <- kNN(country, k=5)
+country<-newdata %>% dplyr::select(pubid:studytype)
+
+country<-country %>% filter(tsamples!=-1)
+country$qsamples<-as.numeric(country$qsamples)
+
+```
+
+```{r}
+Clean_data<-country %>% mutate(country= recode(country,"CÃ´te d'Ivoire"="Ivory Coast")) %>% 
+  mutate(status= case_when(drugstatus %in% c("Falsified","Substandard","Poor quality")~"SF",
+  TRUE ~ "Good"))
+
+```
+
+# Sidebar {.sidebar}
+Select a medicine type to display:
+```{r}
+medicine_choices <- rev(unique(Clean_data$drugtype))
+selectInput("medicine_choice", label = "Display medicine type:",
+            choices =medicine_choices, selected = medicine_choices[[1]])
+```
+
+Click the __Overall__ tab to view the distribution of substandard and falsified
+medicine across the world from all the sampling methods. The __Sampling__ tab 
+shows data collected from convenience or random surveys respectively.The __About__
+tab defines the objective of the application, the source of data and the tools 
+used to develop the application.
+
+Application author: [Lawrence Babu](https://www.tropicalmedicine.ox.ac.uk/team/lawrence-adipo)
+
+Data source : [MQ Surveyor](https://mqdm.iddo.org), University of Oxford, UK
+
+
+# Overall
+
+Column 2 {data-width=350}
+-----------------------------------------------------------------------
+### Summary and action items
+This report provides summary of data from antibiotics and antimalarial drugs. 
+
+* Number of publications, N=149.
+* Survey data points, N=1726, 931 (unique).
+* Samples collected 25579.
+
+### Review data
+
+#### Sample status by count
+
+```{r}
+tsapls<-country %>% group_by(drugstatus) %>% 
+  summarise(Count=sum(qsamples))
+
+#dataset for number of samples
+df <- data.frame(drugstatus=c("Falsified","Good quality","Poor quality",
+            "Substandard"), ntimes=c(600,20574,3920,485))
+df <- as.data.frame(lapply(df, rep, df$ntimes))
+
+
+df %>% count(drugstatus) %>% 
+  adorn_totals() %>% 
+  rename("Drugstatus"=drugstatus, "Count"= n) %>% 
+  knitr::kable()
+
+```
+
+Column 3 {.tabset data-width=650}
+-----------------------------------------------------------------------
+### Samples by country
+```{r}
+#summarise samples per country
+all_samples<-Clean_data %>% 
+ group_by(country) %>% 
+  summarise(Count = n(),
+            all_samples=sum(qsamples))
+
+#world data
+wdata<-map_data("world") %>%
+  filter(region != "Antarctica")
+
+#merge with sample data
+merged<-merge(x=wdata,y=all_samples, by.x = "region", 
+              by.y = "country", all.x = TRUE) %>% arrange(order)
+```
+
+```{r}
+renderPlot({
+#merged <-merged %>%  filter(samplingtype==input$sampling_choice)
+
+#Plot the map
+ ggplot(data = merged, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = all_samples)) + theme_bw() + xlab(NULL) + ylab(NULL) +
+  labs(fill='Total samples', caption = "Source:https://mqdm.iddo.org/"
+  #title = str_glue("Samples collected from {input$sampling_choice}")
+  ) + theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  ) 
+
+})
+
+```
+  
+### Good samples
+
+```{r}
+# Prepare data for quality of samples
+Gsamples<-Clean_data %>% filter(status=="Good") %>% 
+
+   group_by(country) %>% 
+   summarise(Count = n(),
+             gsamples=sum(qsamples),
+             tsamples=sum(tsamples),
+             sfsamples=(tsamples-gsamples)) %>%
+   mutate(prpgs=(gsamples/tsamples)*100,
+          prpfs=(sfsamples/tsamples)*100)
+
+```
+```{r}
+
+m1<-merge(x=wdata,y=Gsamples, by.x = "region", 
+                by.y = "country", all.x = TRUE) %>% arrange(order)
+
+#Map for good samples
+renderPlot({
+  
+#merged <- merged %>%  filter(samplingtype==input$sampling_choice)
+ggplot(data = m1, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = prpgs)) +
+  labs(fill='% Good',caption = "Source:https://mqdm.iddo.org/") + 
+    theme_bw() + xlab(NULL) + ylab(NULL) +  theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  )
+
+})
+
+```
+
+### SF
+
+```{r}
+renderPlot({
+  
+#merged<- merged %>%  filter(samplingtype==input$sampling_choice)
+ggplot(data = m1, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = prpfs)) +
+  labs(fill='% SF',caption = "Source:https://mqdm.iddo.org/") + 
+    theme_bw() + xlab(NULL) + ylab(NULL) +
+    theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  )
+    
+ })
+
+```
+### SF by year of sample collection
+
+```{r}
+renderPlot({
+sf <- read_excel("C:/Gram project/Datasets/sf.xlsx")
+
+sf<-sf %>% filter(styear>=2000) %>% mutate(pct=prp/100,
+                                           lbl = scales::percent(pct))
+
+p <- ggplot(data=sf, aes(x=styear, y=pct, fill= status))
+p+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(breaks = seq(0, 1, .2), label = percent) +
+  geom_text(aes(label =lbl ), 
+            size = 3, 
+            position = position_stack(vjust = 0.5)) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(y = "Percent", 
+       fill="Sample status",
+       x = "Year of sample collection",
+       title = "",caption = "Source:https://mqdm.iddo.org/") +
+  theme_classic() + coord_flip() + theme(legend.background = element_rect( 
+                                  fill="white", colour="white"))
+})
+
+```
+# Convenience survey {data-navmenu="Sampling type"}
+
+Column 4 {.tabset data-width=650}
+-----------------------------------------------------------------------
+```{r}
+csamples<-Clean_data %>%filter(samplingtype %in% c("Convenience survey")) %>% 
+  
+  group_by(country) %>% 
+  summarise(count=n(),
+            samples=sum(qsamples)) 
+
+```
+### Samples by country
+
+```{r}
+#world data
+wdata<-map_data("world") %>%
+  filter(region != "Antarctica")
+
+#merge with sample data
+m2<-merge(x=wdata,y=csamples, by.x = "region", 
+              by.y = "country", all.x = TRUE) %>% arrange(order)
+```
+
+```{r}
+renderPlot({
+  
+#merged <-merged %>%  filter(samplingtype==input$sampling_choice)
+
+#Plot the map
+ggplot(data = m2, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = samples)) + theme_bw() + xlab(NULL) + ylab(NULL) +
+  labs(fill='Total samples',caption = "Source:https://mqdm.iddo.org/" 
+  #title = str_glue("Samples collected from {input$sampling_choice}")
+  ) + theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  )
+  
+})
+```
+
+### Good samples
+
+```{r}
+#  Prepare data for quality of samples
+Gsamples<-Clean_data %>% filter(status=="Good",samplingtype=="Convenience survey") %>% 
+
+   group_by(country) %>% 
+   summarise(Count = n(),
+             gsamples=sum(qsamples),
+             tsamples=sum(tsamples),
+             sfsamples=(tsamples-gsamples)) %>%
+   mutate(prpgs=(gsamples/tsamples)*100,
+          prpfs=(sfsamples/tsamples)*100)
+
+  
+ m3<-merge(x=wdata,y=Gsamples, by.x = "region", 
+                by.y = "country", all.x = TRUE) %>% arrange(order)
+```
+
+```{r}
+#Map for good samples
+renderPlot({
+  
+#merged <- merged %>%  filter(samplingtype==input$sampling_choice)
+ggplot(data = m3, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = prpgs)) + theme_bw() + xlab(NULL) + ylab(NULL) +
+  labs(fill='% Good',caption = "Source:https://mqdm.iddo.org/") + theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  )
+})
+
+```
+
+### SF
+
+```{r}
+renderPlot({
+  
+#merged<- merged %>%  filter(samplingtype==input$sampling_choice)
+ggplot(data = m3, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = prpfs)) + theme_bw() + xlab(NULL) + ylab(NULL) +
+  labs(fill='% SF',caption = "Source:https://mqdm.iddo.org/")+ theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  )
+})
+
+```
+### SF by year of sample collection
+
+```{r}
+
+sfyear<-Clean_data %>% filter(samplingtype=="Convenience survey", status=="Good") %>% 
+  
+  group_by(styear) %>% 
+  summarise(count=n (),
+            Good=sum(qsamples),
+            ysamples=sum(tsamples),
+            SF=ysamples-Good)
+
+h <- highchart() %>% 
+  hc_xAxis(categories = sfyear$styear) %>% 
+  hc_add_series(name = "Good", 
+                data = sfyear$Good) %>% 
+  hc_add_series(name = "SF", 
+                data = sfyear$SF) 
+
+h
+```
+
+```{r}
+
+# customize interactive line chart
+
+h <- h %>%
+  hc_title(text = "SF by year",
+           margin = 20, 
+           align = "left",
+           style = list(color = "steelblue")) %>% 
+  hc_subtitle(text = "1990 to 2020",
+              align = "left",
+              style = list(color = "#2b908f", 
+                           fontWeight = "bold")) %>% 
+  hc_credits(enabled = TRUE, # add credits
+             text = "Surveyor Data",
+             href = "https://mqdm.iddo.org/") %>% 
+  hc_legend(align = "left", 
+            verticalAlign = "top",
+            layout = "vertical", 
+            x = 0, 
+            y = 100) %>%
+  hc_tooltip(crosshairs = TRUE, 
+             backgroundColor = "#FCFFC5",
+             shared = TRUE, 
+             borderWidth = 4) %>% 
+  hc_exporting(enabled = TRUE)
+
+h
+
+```
+
+# Random survey {data-navmenu="Sampling type"}
+
+Column 5 {.tabset data-width=650}
+-----------------------------------------------------------------------
+```{r}
+
+Rsamples<-Clean_data %>%filter(samplingtype %in% c("Random survey")) %>% 
+  
+  group_by(country) %>% 
+  summarise(count=n(),
+            samples=sum(qsamples)) 
+
+```
+### Samples by country
+
+```{r}
+#world data
+wdata<-map_data("world") %>%
+  filter(region != "Antarctica")
+
+#merge with sample data
+m4<-merge(x=wdata,y=Rsamples, by.x = "region", 
+              by.y = "country", all.x = TRUE) %>% arrange(order)
+```
+
+```{r}
+renderPlot({
+  
+#merged <-merged %>%  filter(samplingtype==input$sampling_choice)
+
+#Plot the map
+ggplot(data = m4, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = samples))+ theme_bw()  + xlab(NULL) + ylab(NULL)+ 
+  labs(fill='Total samples',caption = "Source:https://mqdm.iddo.org/" 
+  #title = str_glue("Samples collected from {input$sampling_choice}")
+  ) + theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  )
+  
+})
+
+```
+
+### Good samples
+
+```{r}
+#  Prepare data for quality of samples
+Gsamples<-Clean_data %>% filter(status=="Good",samplingtype=="Random survey") %>% 
+
+   group_by(country) %>% 
+   summarise(Count = n(),
+             gsamples=sum(qsamples),
+             tsamples=sum(tsamples),
+             sfsamples=(tsamples-gsamples)) %>%
+   mutate(prpgs=(gsamples/tsamples)*100,
+          prpfs=(sfsamples/tsamples)*100)
+
+ m5<-merge(x=wdata,y=Gsamples, by.x = "region", 
+                by.y = "country", all.x = TRUE) %>% arrange(order)
+```
+
+```{r}
+
+#Map for good samples
+renderPlot({
+  
+#merged <- merged %>%  filter(samplingtype==input$sampling_choice)
+ggplot(data = m5, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = prpgs)) + theme_bw() + xlab(NULL) + ylab(NULL)+
+  labs(fill='% Good',caption = "Source:https://mqdm.iddo.org/") + theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  )
+
+})
+
+```
+
+### SF
+
+```{r}
+renderPlot({
+  
+#merged<- merged %>%  filter(samplingtype==input$sampling_choice)
+ggplot(data = m5, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = prpfs)) +  theme_bw() + xlab(NULL) + ylab(NULL) +
+  labs(fill='% SF',caption = "Source:https://mqdm.iddo.org/") + theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+   ,axis.ticks = element_blank()
+   ,axis.text.x = element_blank()
+   ,axis.text.y = element_blank()
+   ,legend.position = "bottom"
+   ,legend.direction = "horizontal"
+  )
+})
+
+```
+### SF by year of sample collection
+
+```{r}
+
+ryear<-Clean_data %>% filter(samplingtype=="Random survey", status=="Good") %>% 
+  
+  group_by(styear) %>% 
+  summarise(count=n (),
+            Good=sum(qsamples),
+            ysamples=sum(tsamples),
+            SF=ysamples-Good)
+
+
+i <- highchart() %>% 
+  hc_xAxis(categories = ryear$styear) %>% 
+  hc_add_series(name = "Good", 
+                data = ryear$Good) %>% 
+  hc_add_series(name = "SF", 
+                data = ryear$SF) 
+
+i
+```
+
+
+```{r}
+# customize interactive line chart
+
+i <- i %>%
+  hc_title(text = "SF by year",
+           margin = 20, 
+           align = "left",
+           style = list(color = "steelblue")) %>% 
+  hc_subtitle(text = "1990 to 2020",
+              align = "left",
+              style = list(color = "#2b908f", 
+                           fontWeight = "bold")) %>% 
+  hc_credits(enabled = TRUE, # add credits
+             text = "Surveyor Data",
+             href = "https://mqdm.iddo.org/") %>% 
+  hc_legend(align = "left", 
+            verticalAlign = "top",
+            layout = "vertical", 
+            x = 0, 
+            y = 100) %>%
+  hc_tooltip(crosshairs = TRUE, 
+             backgroundColor = "#FCFFC5",
+             shared = TRUE, 
+             borderWidth = 4) %>% 
+  hc_exporting(enabled = TRUE)
+
+i
+
+```
+
+
